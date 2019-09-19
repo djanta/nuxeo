@@ -86,7 +86,7 @@ public class Comments {
         comment.setParentId(parentId);
 
         Calendar creationDate = (Calendar) documentModel.getPropertyValue(COMMENT_CREATION_DATE);
-        if (creationDate != null) {
+            if (creationDate != null) {
             comment.setCreationDate(creationDate.toInstant());
         }
         Calendar modificationDate = (Calendar) documentModel.getPropertyValue(COMMENT_MODIFICATION_DATE);

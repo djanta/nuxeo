@@ -25,8 +25,6 @@ import static org.nuxeo.ecm.platform.comment.api.AnnotationConstants.ANNOTATION_
 import static org.nuxeo.ecm.platform.comment.api.AnnotationConstants.ANNOTATION_XPATH_PROPERTY;
 import static org.nuxeo.ecm.platform.comment.api.CommentManager.Feature.COMMENTS_LINKED_WITH_PROPERTY;
 import static org.nuxeo.ecm.platform.comment.api.ExternalEntityConstants.EXTERNAL_ENTITY_FACET;
-import static org.nuxeo.ecm.platform.comment.workflow.utils.CommentsConstants.COMMENT_AUTHOR;
-import static org.nuxeo.ecm.platform.comment.workflow.utils.CommentsConstants.COMMENT_PARENT_ID;
 import static org.nuxeo.ecm.platform.query.nxql.CoreQueryAndFetchPageProvider.CORE_SESSION_PROPERTY;
 
 import java.io.Serializable;
@@ -42,13 +40,13 @@ import org.apache.logging.log4j.Logger;
 import org.nuxeo.ecm.core.api.CoreInstance;
 import org.nuxeo.ecm.core.api.CoreSession;
 import org.nuxeo.ecm.core.api.DocumentModel;
-import org.nuxeo.ecm.core.api.DocumentNotFoundException;
 import org.nuxeo.ecm.core.api.DocumentRef;
 import org.nuxeo.ecm.core.api.IdRef;
 import org.nuxeo.ecm.core.api.NuxeoPrincipal;
 import org.nuxeo.ecm.core.api.security.SecurityConstants;
 import org.nuxeo.ecm.platform.comment.api.Annotation;
 import org.nuxeo.ecm.platform.comment.api.AnnotationService;
+import org.nuxeo.ecm.platform.comment.api.Comment;
 import org.nuxeo.ecm.platform.comment.api.CommentManager;
 import org.nuxeo.ecm.platform.comment.api.Comments;
 import org.nuxeo.ecm.platform.comment.api.ExternalEntity;
@@ -92,21 +90,12 @@ public class AnnotationServiceImpl extends DefaultComponent implements Annotatio
     }
 
     @Override
-    public Annotation getAnnotation(CoreSession session, String annotationId)
+    public Annotation getAnnotation(CoreSession s, String annotationId)
             throws CommentNotFoundException, CommentSecurityException {
-        DocumentRef annotationRef = new IdRef(annotationId);
-        if (!session.exists(annotationRef)) {
-            throw new CommentNotFoundException("The document " + annotationId + " does not exist.");
-        }
-        NuxeoPrincipal principal = session.getPrincipal();
-        return CoreInstance.doPrivileged(session, s -> {
-            DocumentModel annotationModel = s.getDocument(annotationRef);
-            String parentId = (String) annotationModel.getPropertyValue(COMMENT_PARENT_ID);
-            if (!s.hasPermission(principal, new IdRef(parentId), SecurityConstants.READ)) {
-                throw new CommentSecurityException("The user " + principal.getName()
-                        + " does not have access to the annotations of document " + parentId);
-            }
-            return Comments.newAnnotation(annotationModel);
+        // If we session user has the right permission to get the comment, he can get the annotation
+        Comment comment = Framework.getService(CommentManager.class).getComment(s, annotationId);
+        return CoreInstance.doPrivileged(s, session -> {
+            return Comments.newAnnotation(session.getDocument(new IdRef(comment.getId())));
         });
     }
 
@@ -167,38 +156,16 @@ public class AnnotationServiceImpl extends DefaultComponent implements Annotatio
 
     @Override
     public void deleteAnnotation(CoreSession session, String annotationId) throws CommentNotFoundException {
-        NuxeoPrincipal principal = session.getPrincipal();
-        CoreInstance.doPrivileged(session, s -> {
-            try {
-                DocumentModel annotation = s.getDocument(new IdRef(annotationId));
-                String parentId = (String) annotation.getPropertyValue(COMMENT_PARENT_ID);
-                DocumentRef parentRef = new IdRef(parentId);
-                if (!principal.isAdministrator()
-                        && !annotation.getPropertyValue(COMMENT_AUTHOR).equals(principal.getName())
-                        && !s.hasPermission(principal, parentRef, SecurityConstants.EVERYTHING)) {
-                    throw new CommentSecurityException(
-                            "The user " + principal.getName() + " can not delete annotations of document " + parentId);
-                }
-            } catch (DocumentNotFoundException e) {
-                throw new CommentNotFoundException(e);
-            }
-            Framework.getService(CommentManager.class).deleteComment(s, annotationId);
-        });
+        Framework.getService(CommentManager.class).deleteComment(session, annotationId);
     }
 
     @Override
     public Annotation getExternalAnnotation(CoreSession session, String entityId)
             throws CommentNotFoundException, CommentSecurityException {
-        DocumentModel annotationModel = getAnnotationModel(session, entityId);
-        if (annotationModel == null) {
-            throw new CommentNotFoundException("The external annotation " + entityId + " does not exist.");
-        }
-        String parentId = (String) annotationModel.getPropertyValue(COMMENT_PARENT_ID);
-        if (!session.hasPermission(new IdRef(parentId), SecurityConstants.READ)) {
-            throw new CommentSecurityException("The user " + session.getPrincipal().getName()
-                    + " does not have access to the annotations of document " + parentId);
-        }
-        return Comments.newAnnotation(annotationModel);
+        Comment externalComment = Framework.getService(CommentManager.class).getExternalComment(session, entityId);
+        return CoreInstance.doPrivileged(session, s -> {
+            return Comments.newAnnotation(s.getDocument(new IdRef(externalComment.getId())));
+        });
     }
 
     @Override
@@ -223,19 +190,7 @@ public class AnnotationServiceImpl extends DefaultComponent implements Annotatio
     @Override
     public void deleteExternalAnnotation(CoreSession session, String entityId)
             throws CommentNotFoundException, CommentSecurityException {
-        DocumentModel annotationModel = getAnnotationModel(session, entityId);
-        if (annotationModel == null) {
-            throw new CommentNotFoundException("The external annotation " + entityId + " does not exist.");
-        }
-        NuxeoPrincipal principal = session.getPrincipal();
-        String parentId = (String) annotationModel.getPropertyValue(COMMENT_PARENT_ID);
-        if (!principal.isAdministrator()
-                && !annotationModel.getPropertyValue(COMMENT_AUTHOR).equals(principal.getName())
-                && !session.hasPermission(new IdRef(parentId), SecurityConstants.EVERYTHING)) {
-            throw new CommentSecurityException(
-                    "The user " + principal.getName() + " can not delete annotations of document " + parentId);
-        }
-        Framework.getService(CommentManager.class).deleteComment(session, annotationModel.getId());
+        Framework.getService(CommentManager.class).deleteExternalComment(session, entityId);
     }
 
     @SuppressWarnings("unchecked")

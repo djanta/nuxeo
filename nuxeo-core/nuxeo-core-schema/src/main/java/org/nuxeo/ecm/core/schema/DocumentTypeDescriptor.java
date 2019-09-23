@@ -27,6 +27,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.nuxeo.common.xmap.annotation.XNode;
 import org.nuxeo.common.xmap.annotation.XNodeList;
 import org.nuxeo.common.xmap.annotation.XObject;
+import org.nuxeo.runtime.model.Descriptor;
 
 /**
  * Document Type Descriptor.
@@ -40,7 +41,10 @@ import org.nuxeo.common.xmap.annotation.XObject;
  * @author <a href="mailto:bs@nuxeo.com">Bogdan Stefanescu</a>
  */
 @XObject("doctype")
-public class DocumentTypeDescriptor {
+public class DocumentTypeDescriptor implements Descriptor {
+
+    @XNode("@id")
+    public String id;
 
     @XNode("@name")
     public String name;
@@ -59,6 +63,14 @@ public class DocumentTypeDescriptor {
 
     @XNode("@append")
     public boolean append = false;
+
+    /**
+     * Allows to exclude the doctype from copy operations for example.
+     *
+     * @since 11.1
+     */
+    @XNode("@special")
+    public Boolean special;
 
     @XNodeList(value = "subtypes/type", type = String[].class, componentType = String.class)
     public String[] subtypes = new String[0];
@@ -97,6 +109,7 @@ public class DocumentTypeDescriptor {
         clone.facets = facets;
         clone.prefetch = prefetch;
         clone.append = append;
+        clone.special = special;
         clone.subtypes = subtypes;
         clone.forbiddenSubtypes = forbiddenSubtypes;
         return clone;
@@ -135,6 +148,9 @@ public class DocumentTypeDescriptor {
             superTypeName = other.superTypeName;
         }
 
+        // inherit the exclusion from copy
+        special = special == null ? other.special : special;
+
         // merge subtypes
         if (subtypes == null) {
             subtypes = other.subtypes;
@@ -152,6 +168,11 @@ public class DocumentTypeDescriptor {
         }
 
         return this;
+    }
+
+    @Override
+    public String getId() {
+        return id;
     }
 
 }

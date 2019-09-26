@@ -439,7 +439,7 @@ public class CommentManagerImpl extends AbstractCommentManager {
         return CoreInstance.doPrivileged(s, session -> {
             DocumentRef docRef = new IdRef(documentId);
             if (!session.exists(docRef)) {
-                return new PartialList<>(Collections.emptyList(), 0);
+                return new PartialList<Comment>(Collections.emptyList(), 0); // NOSONAR
             }
             DocumentModel commentedDoc = session.getDocument(docRef);
             // do a dummy implementation of pagination for former comment manager implementation

@@ -29,12 +29,17 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.nuxeo.ecm.core.api.event.DocumentEventTypes.DOCUMENT_CREATED;
+import static org.nuxeo.ecm.core.storage.BaseDocument.RELATED_TEXT;
+import static org.nuxeo.ecm.core.storage.BaseDocument.RELATED_TEXT_ID;
+import static org.nuxeo.ecm.core.storage.BaseDocument.RELATED_TEXT_RESOURCES;
+import static org.nuxeo.ecm.platform.comment.impl.AbstractCommentManager.COMMENT_RELATED_TEXT_ID;
 import static org.nuxeo.ecm.platform.comment.workflow.utils.CommentsConstants.COMMENTS_DIRECTORY_TYPE;
 import static org.nuxeo.ecm.platform.comment.workflow.utils.CommentsConstants.COMMENT_DOC_TYPE;
 import static org.nuxeo.ecm.platform.ec.notification.NotificationConstants.DISABLE_NOTIFICATION_SERVICE;
 
 import java.io.Serializable;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -593,10 +598,17 @@ public class TestTreeCommentManager extends AbstractTestCommentManager {
      * @return the sample comment
      */
     protected Comment createSampleComment(String parentId) {
+        return createSampleComment(parentId, COMMENT_TEXT);
+    }
+
+    /**
+     * @return the sample comment
+     */
+    protected Comment createSampleComment(String parentId, String text) {
         Comment comment = new CommentImpl();
         comment.setParentId(parentId);
         comment.setAuthor(session.getPrincipal().getName());
-        comment.setText(COMMENT_TEXT);
+        comment.setText(text);
         comment.setCreationDate(Instant.now().truncatedTo(MILLIS));
 
         return comment;
@@ -624,6 +636,117 @@ public class TestTreeCommentManager extends AbstractTestCommentManager {
         DocumentModelList documents = session.query(query);
         assertEquals(1, documents.size());
         return documents.get(0);
+    }
+
+    @Test
+    public void shouldFindCommentedFileByFullTextSearch() {
+        DocumentModel firstDocToComment = createDocumentModel("anotherFile1");
+        DocumentModel secondDocToComment = createDocumentModel("anotherFile2");
+        Map<DocumentRef, List<Comment>> mapCommentsByDocRef = createCommentsAndRepliesForFullTextSearch(
+                firstDocToComment, secondDocToComment);
+
+        // One comment and 3 replies
+        checkRelatedTextResource(firstDocToComment.getRef(), mapCommentsByDocRef.get(firstDocToComment.getRef()));
+
+        // One comment and no replies
+        checkRelatedTextResource(secondDocToComment.getRef(), mapCommentsByDocRef.get(secondDocToComment.getRef()));
+
+        // We make a fulltext query to find the 2 commented files
+        makeAndVerifyFullTextSearch("first comment", List.of(firstDocToComment, secondDocToComment));
+
+        // We make a fulltext query to find the second commented file
+        makeAndVerifyFullTextSearch("secondFile", List.of(secondDocToComment));
+
+        // We make a fulltext query to find the first commented file by any reply
+        makeAndVerifyFullTextSearch("reply", List.of(firstDocToComment));
+
+        // Now we edit and change the comment text of the second reply
+        makeAndVerifyFullTextSearch("UpdatedReply", List.of());
+
+        // Get the second reply and update his text
+        Comment secondCreatedReply = mapCommentsByDocRef.get(firstDocToComment.getRef()).get(2);
+        secondCreatedReply.setText("I am an UpdatedReply");
+        commentManager.updateComment(session, secondCreatedReply.getId(), secondCreatedReply);
+        transactionalFeature.nextTransaction();
+
+        // Now we should find the document with this updated reply text
+        makeAndVerifyFullTextSearch("UpdatedReply", List.of(firstDocToComment));
+
+        // Now let's remove this second reply
+        commentManager.deleteComment(session, secondCreatedReply.getId());
+        transactionalFeature.nextTransaction();
+        makeAndVerifyFullTextSearch("UpdatedReply", List.of());
+
+        List<Comment> comments = mapCommentsByDocRef.get(firstDocToComment.getRef())
+                                                    .stream()
+                                                    .filter(c -> !c.getId().equals(secondCreatedReply.getId()))
+                                                    .collect(Collectors.toList());
+        checkRelatedTextResource(firstDocToComment.getRef(), comments);
+    }
+
+    protected Map<DocumentRef, List<Comment>> createCommentsAndRepliesForFullTextSearch(DocumentModel firstDocToComment,
+            DocumentModel secondDocToComment) {
+
+        // Create 2 comments on the two files
+        Comment firstCommentOfFile1 = createSampleComment(firstDocToComment.getId(),
+                "I am the first comment of firstFile");
+        firstCommentOfFile1 = createAndCheckComment(session, firstDocToComment, firstCommentOfFile1, 1);
+
+        Comment firstCommentOfFile2 = createSampleComment(secondDocToComment.getId(),
+                "I am the first comment of secondFile");
+        firstCommentOfFile2 = createAndCheckComment(session, secondDocToComment, firstCommentOfFile2, 1);
+
+        // Create first reply on first comment of first file
+        Comment firstReply = createSampleComment(firstCommentOfFile1.getId(), "I am the first reply of first comment");
+        Comment firstCreatedReply = createAndCheckComment(session,
+                session.getDocument(new IdRef(firstCommentOfFile1.getId())), firstReply, 2);
+
+        // Create second reply
+        Comment secondReply = createSampleComment(firstCreatedReply.getId(), "I am the second reply of first comment");
+        Comment secondCreatedReply = createAndCheckComment(session,
+                session.getDocument(new IdRef(firstCreatedReply.getId())), secondReply, 3);
+
+        // Create third reply
+        Comment thirdReply = createSampleComment(secondCreatedReply.getId(), "I am the third reply of first comment");
+        Comment thirdCreatedReply = createAndCheckComment(session,
+                session.getDocument(new IdRef(secondCreatedReply.getId())), thirdReply, 4);
+
+        return Map.of( //
+                firstDocToComment.getRef(),
+                List.of(firstCommentOfFile1, firstCreatedReply, secondCreatedReply, thirdCreatedReply), //
+                secondDocToComment.getRef(), List.of(firstCommentOfFile2) //
+        );
+    }
+
+    protected void makeAndVerifyFullTextSearch(String ecmFullText, List<DocumentModel> expectedDocs) {
+        String query = String.format(
+                "SELECT * FROM Document WHERE ecm:fulltext = '%s' AND ecm:mixinType != 'HiddenInNavigation'",
+                ecmFullText);
+
+        DocumentModelList documents = session.query(query);
+        assertEquals(
+                expectedDocs.stream().sorted(Comparator.comparing(DocumentModel::getId)).collect(Collectors.toList()), //
+                documents.stream().sorted(Comparator.comparing(DocumentModel::getId)).collect(Collectors.toList()));
+    }
+
+    @SuppressWarnings("unchecked")
+    protected void checkRelatedTextResource(DocumentRef documentRef, List<Comment> comments) {
+        DocumentModel document = session.getDocument(documentRef);
+
+        List<Map<String, String>> resources = (List<Map<String, String>>) document.getPropertyValue(
+                RELATED_TEXT_RESOURCES);
+
+        List<String> relatedTextIds = comments.stream()
+                                              .map(c -> String.format(COMMENT_RELATED_TEXT_ID, c.getId()))
+                                              .sorted()
+                                              .collect(Collectors.toList());
+
+        List<String> relatedTextValues = comments.stream().map(Comment::getText).sorted().collect(Collectors.toList());
+
+        assertEquals(relatedTextIds,
+                resources.stream().map(m -> m.get(RELATED_TEXT_ID)).sorted().collect(Collectors.toList()));
+        assertEquals(relatedTextValues,
+                resources.stream().map(m -> m.get(RELATED_TEXT)).sorted().collect(Collectors.toList()));
     }
 
     @Override

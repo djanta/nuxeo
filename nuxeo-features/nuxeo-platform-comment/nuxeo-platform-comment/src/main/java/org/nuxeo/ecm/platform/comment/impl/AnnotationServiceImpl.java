@@ -33,8 +33,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.nuxeo.ecm.core.api.CoreInstance;
@@ -42,7 +40,6 @@ import org.nuxeo.ecm.core.api.CoreSession;
 import org.nuxeo.ecm.core.api.DocumentModel;
 import org.nuxeo.ecm.core.api.DocumentRef;
 import org.nuxeo.ecm.core.api.IdRef;
-import org.nuxeo.ecm.core.api.NuxeoPrincipal;
 import org.nuxeo.ecm.core.api.security.SecurityConstants;
 import org.nuxeo.ecm.platform.comment.api.Annotation;
 import org.nuxeo.ecm.platform.comment.api.AnnotationService;
@@ -134,23 +131,7 @@ public class AnnotationServiceImpl extends DefaultComponent implements Annotatio
     @Override
     public void updateAnnotation(CoreSession session, String annotationId, Annotation annotation)
             throws CommentNotFoundException, CommentSecurityException {
-        IdRef annotationRef = new IdRef(annotationId);
-        if (!session.exists(annotationRef)) {
-            throw new CommentNotFoundException("The annotation " + annotationId + " does not exist.");
-        }
-        NuxeoPrincipal principal = session.getPrincipal();
-        if (!principal.isAdministrator() && !annotation.getAuthor().equals(principal.getName())) {
-            throw new CommentSecurityException("The user " + principal.getName()
-                    + " can not edit annotations of document " + annotation.getParentId());
-        }
-        CoreInstance.doPrivileged(session, s -> {
-            DocumentModel annotationModel = s.getDocument(annotationRef);
-            Comments.annotationToDocumentModel(annotation, annotationModel);
-            if (annotation instanceof ExternalEntity) {
-                Comments.externalEntityToDocumentModel((ExternalEntity) annotation, annotationModel);
-            }
-            s.saveDocument(annotationModel);
-        });
+        Framework.getService(CommentManager.class).updateComment(session, annotationId, annotation);
     }
 
     @Override
@@ -161,29 +142,13 @@ public class AnnotationServiceImpl extends DefaultComponent implements Annotatio
     @Override
     public Annotation getExternalAnnotation(CoreSession session, String entityId)
             throws CommentNotFoundException, CommentSecurityException {
-        Comment externalComment = Framework.getService(CommentManager.class).getExternalComment(session, entityId);
-        return CoreInstance.doPrivileged(session, s -> {
-            return Comments.newAnnotation(s.getDocument(new IdRef(externalComment.getId())));
-        });
+        return (Annotation) Framework.getService(CommentManager.class).getExternalComment(session, entityId);
     }
 
     @Override
     public void updateExternalAnnotation(CoreSession session, String entityId, Annotation annotation)
             throws CommentNotFoundException, CommentSecurityException {
-        NuxeoPrincipal principal = session.getPrincipal();
-        if (!principal.isAdministrator() && !annotation.getAuthor().equals(principal.getName())) {
-            throw new CommentSecurityException("The user " + session.getPrincipal().getName()
-                    + " can not edit annotations of document " + annotation.getParentId());
-        }
-        DocumentModel annotationModel = getAnnotationModel(session, entityId);
-        if (annotationModel == null) {
-            throw new CommentNotFoundException("The external annotation " + entityId + " does not exist.");
-        }
-        Comments.annotationToDocumentModel(annotation, annotationModel);
-        if (annotation instanceof ExternalEntity) {
-            Comments.externalEntityToDocumentModel((ExternalEntity) annotation, annotationModel);
-        }
-        session.saveDocument(annotationModel);
+        Framework.getService(CommentManager.class).updateExternalComment(session, entityId, annotation);
     }
 
     @Override
@@ -192,7 +157,11 @@ public class AnnotationServiceImpl extends DefaultComponent implements Annotatio
         Framework.getService(CommentManager.class).deleteExternalComment(session, entityId);
     }
 
+    /**
+     * @deprecated since 11.1. No used any more.
+     */
     @SuppressWarnings("unchecked")
+    @Deprecated(since = "11.1", forRemoval = true)
     protected DocumentModel getAnnotationModel(CoreSession session, String entityId) {
         PageProviderService ppService = Framework.getService(PageProviderService.class);
         Map<String, Serializable> props = singletonMap(CORE_SESSION_PROPERTY, (Serializable) session);

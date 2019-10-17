@@ -21,6 +21,9 @@
 
 package org.nuxeo.ecm.platform.comment.impl;
 
+import static org.nuxeo.ecm.core.storage.BaseDocument.RELATED_TEXT;
+import static org.nuxeo.ecm.core.storage.BaseDocument.RELATED_TEXT_ID;
+import static org.nuxeo.ecm.core.storage.BaseDocument.RELATED_TEXT_RESOURCES;
 import static org.nuxeo.ecm.platform.comment.workflow.utils.CommentsConstants.COMMENT_AUTHOR;
 import static org.nuxeo.ecm.platform.comment.workflow.utils.CommentsConstants.COMMENT_PARENT_ID;
 import static org.nuxeo.ecm.platform.comment.workflow.utils.CommentsConstants.COMMENT_SCHEMA;
@@ -32,6 +35,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.nuxeo.ecm.core.api.CoreSession;
@@ -50,6 +54,7 @@ import org.nuxeo.ecm.core.api.security.impl.ACPImpl;
 import org.nuxeo.ecm.core.event.Event;
 import org.nuxeo.ecm.core.event.EventProducer;
 import org.nuxeo.ecm.core.event.impl.DocumentEventContext;
+import org.nuxeo.ecm.platform.comment.api.Annotation;
 import org.nuxeo.ecm.platform.comment.api.Comment;
 import org.nuxeo.ecm.platform.comment.api.CommentConstants;
 import org.nuxeo.ecm.platform.comment.api.CommentManager;
@@ -64,6 +69,12 @@ public abstract class AbstractCommentManager implements CommentManager {
     private static final Log log = LogFactory.getLog(AbstractCommentManager.class);
 
     protected static final String COMMENTS_DIRECTORY = "Comments";
+
+    /**@since 11.1**/
+    public static final String COMMENT_RELATED_TEXT_ID = "relatedComment_%s";
+
+    /**@since 11.1**/
+    public static final String ANNOTATION_RELATED_TEXT_ID = "relatedAnnotation_%s";
 
     @Override
     public List<DocumentModel> getComments(DocumentModel docModel) {

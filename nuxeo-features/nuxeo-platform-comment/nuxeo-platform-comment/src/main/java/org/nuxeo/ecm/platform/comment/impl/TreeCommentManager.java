@@ -19,12 +19,18 @@
 
 package org.nuxeo.ecm.platform.comment.impl;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static java.lang.Boolean.TRUE;
 import static java.util.Collections.singletonList;
 import static java.util.Collections.singletonMap;
 import static java.util.stream.Collectors.collectingAndThen;
 import static java.util.stream.Collectors.toList;
+import static org.apache.commons.lang3.StringUtils.isNotEmpty;
 import static org.nuxeo.ecm.core.api.security.SecurityConstants.EVERYTHING;
+import static org.nuxeo.ecm.core.schema.FacetNames.HAS_RELATED_TEXT;
+import static org.nuxeo.ecm.core.storage.BaseDocument.RELATED_TEXT;
+import static org.nuxeo.ecm.core.storage.BaseDocument.RELATED_TEXT_ID;
+import static org.nuxeo.ecm.core.storage.BaseDocument.RELATED_TEXT_RESOURCES;
 import static org.nuxeo.ecm.platform.comment.api.CommentManager.Feature.COMMENTS_LINKED_WITH_PROPERTY;
 import static org.nuxeo.ecm.platform.comment.api.ExternalEntityConstants.EXTERNAL_ENTITY_FACET;
 import static org.nuxeo.ecm.platform.comment.impl.PropertyCommentManager.COMMENT_NAME;
@@ -41,6 +47,7 @@ import static org.nuxeo.ecm.platform.query.nxql.CoreQueryAndFetchPageProvider.CO
 import java.io.Serializable;
 import java.time.Instant;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -54,8 +61,11 @@ import org.nuxeo.ecm.core.api.NuxeoPrincipal;
 import org.nuxeo.ecm.core.api.PartialList;
 import org.nuxeo.ecm.core.api.SortInfo;
 import org.nuxeo.ecm.core.api.security.SecurityConstants;
+import org.nuxeo.ecm.platform.comment.api.Annotation;
+import org.nuxeo.ecm.platform.comment.api.AnnotationImpl;
 import org.nuxeo.ecm.platform.comment.api.Comment;
 import org.nuxeo.ecm.platform.comment.api.CommentEvents;
+import org.nuxeo.ecm.platform.comment.api.CommentImpl;
 import org.nuxeo.ecm.platform.comment.api.Comments;
 import org.nuxeo.ecm.platform.comment.api.ExternalEntity;
 import org.nuxeo.ecm.platform.comment.api.exceptions.CommentNotFoundException;
@@ -134,7 +144,10 @@ public class TreeCommentManager extends AbstractCommentManager {
         DocumentModel commentModel = getExternalCommentModel(session, entityId);
         // Check the read permissions using the given session
         checkReadCommentPermissions(session, commentModel.getRef());
-        return Framework.doPrivileged(() -> Comments.newComment(commentModel));
+        return Framework.doPrivileged(() -> COMMENT_DOC_TYPE.equals(commentModel.getType())
+               ? Comments.newComment(commentModel)
+               : Comments.newAnnotation(commentModel)
+        );
     }
 
     @Override
@@ -162,10 +175,16 @@ public class TreeCommentManager extends AbstractCommentManager {
                 Comments.externalEntityToDocumentModel((ExternalEntity) comment, commentDocModel);
             }
 
+            // Create the comment document model
             commentDocModel = session.createDocument(commentDocModel);
+            Comment createdComment = Comments.newComment(commentDocModel);
+
+            // Manage the related text of the top level document
+            manageRelatedTextOfTopLevelDocument(session, createdComment);
+
             notifyEvent(session, CommentEvents.COMMENT_ADDED, session.getDocument(commentDocModel.getParentRef()),
                     commentDocModel);
-            return Comments.newComment(commentDocModel);
+            return createdComment;
         });
     }
 
@@ -186,7 +205,12 @@ public class TreeCommentManager extends AbstractCommentManager {
             commentModelToCreate.setPropertyValue(COMMENT_ANCESTOR_IDS,
                     (Serializable) computeAncestorIds(session, documentModel.getId()));
 
+            // Create the comment doc model
             commentModelToCreate = session.createDocument(commentModelToCreate);
+
+            // Manage the related text of the top level document
+            manageRelatedTextOfTopLevelDocument(session, commentModelToCreate);
+
             commentModelToCreate.detach(true);
             notifyEvent(session, CommentEvents.COMMENT_ADDED, documentModel, commentModelToCreate);
             return commentModelToCreate;
@@ -226,12 +250,25 @@ public class TreeCommentManager extends AbstractCommentManager {
                 comment.setModificationDate(Instant.now());
             }
 
-            Comments.commentToDocumentModel(comment, commentDocumentModel);
+            if (comment instanceof Annotation) {
+                Comments.annotationToDocumentModel((Annotation) comment, commentDocumentModel);
+            } else {
+                Comments.commentToDocumentModel(comment, commentDocumentModel);
+            }
+
             if (comment instanceof ExternalEntity) {
                 Comments.externalEntityToDocumentModel((ExternalEntity) comment, commentDocumentModel);
             }
-            session.saveDocument(commentDocumentModel);
-            return Comments.newComment(commentDocumentModel);
+
+            // Create the comment document model
+            commentDocumentModel = session.saveDocument(commentDocumentModel);
+
+            // Manage the related text of the top level document
+            manageRelatedTextOfTopLevelDocument(session, commentDocumentModel);
+
+            return comment instanceof Annotation //
+                    ? Comments.newAnnotation(commentDocumentModel) //
+                    : Comments.newComment(commentDocumentModel);
         });
     }
 
@@ -247,7 +284,10 @@ public class TreeCommentManager extends AbstractCommentManager {
             if (comment instanceof ExternalEntity) {
                 Comments.externalEntityToDocumentModel((ExternalEntity) comment, commentDocModel);
             }
-            session.saveDocument(commentDocModel);
+            commentDocModel = session.saveDocument(commentDocModel);
+
+            // Manage the related text of the top level document
+            manageRelatedTextOfTopLevelDocument(session, commentDocModel);
             return Comments.newComment(commentDocModel);
         });
     }
@@ -415,6 +455,17 @@ public class TreeCommentManager extends AbstractCommentManager {
                 throw new CommentSecurityException(String.format("The user %s cannot delete comment of the document %s",
                         principal.getName(), ancestorRef));
             }
+
+            // Create a comment without a text to allow removing it from the related resources of the top level document
+            Comment comment = COMMENT_DOC_TYPE.equals(commentDocModel.getType()) ? new CommentImpl()
+                    : new AnnotationImpl();
+            comment.setText(null);
+            comment.setId(commentDocModel.getId());
+            comment.setParentId(ancestorRef.toString());
+
+            // Manage the related text of the top level document
+            manageRelatedTextOfTopLevelDocument(session, comment);
+
             DocumentModel parent = session.getDocument(commentDocModel.getParentRef());
             commentDocModel.detach(true);
             session.removeDocument(documentRef);
@@ -460,5 +511,68 @@ public class TreeCommentManager extends AbstractCommentManager {
 
         return (PageProvider<DocumentModel>) ppService.getPageProvider(GET_COMMENTS_FOR_DOCUMENT_PAGE_PROVIDER_NAME,
                 sortInfos, pageSize, currentPageIndex, props, documentId);
+    }
+
+    /**
+     * Manages (Add, Update or Remove) the related text {@link org.nuxeo.ecm.core.schema.FacetNames#HAS_RELATED_TEXT} of
+     * the top level document ancestor {@link #getTopLevelCommentAncestor(CoreSession, DocumentRef)} for the given
+     * comment. Each action of adding, updating or removing the comment text will call this method, which allow us to
+     * make the right action on the related text of the top level document.
+     * <ul>
+     * <li>Add a new Comment / Annotation will create a separate entry</li>
+     * <li>Update a text Comment / Annotation will update this specific entry</li>
+     * <li>Remove a Comment / Annotation will remove this specific entry</li>
+     * </ul>
+     * 
+     * @since 11.1
+     **/
+    protected void manageRelatedTextOfTopLevelDocument(CoreSession session, Comment comment) {
+        checkArgument(isNotEmpty(comment.getId()), "Comment id is required");
+        checkArgument(isNotEmpty(comment.getParentId()), "Comment parent id is required");
+
+        // Get the related text id (the related text key is separated in the case of Comment or Annotation)
+        String relatedTextId = String.format( //
+                comment instanceof Annotation ? ANNOTATION_RELATED_TEXT_ID : COMMENT_RELATED_TEXT_ID, //
+                comment.getId());
+
+        // Get the Top level document model (the first document of our comments tree) will contains the text that came
+        // from comments
+        DocumentRef topLevelDocRef = getTopLevelCommentAncestor(session, new IdRef(comment.getParentId()));
+        DocumentModel topLevelDoc = session.getDocument(topLevelDocRef);
+        topLevelDoc.addFacet(HAS_RELATED_TEXT);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, String>> resources = (List<Map<String, String>>) topLevelDoc.getPropertyValue(
+                RELATED_TEXT_RESOURCES);
+
+        Map<String, String> relatedTextMap = resources.stream()
+                                                      .filter(m -> relatedTextId.contains(m.get(RELATED_TEXT_ID)))
+                                                      .findAny()
+                                                      .orElseGet(() -> new HashMap<>(0));
+
+        if (isNotEmpty(comment.getText())) { // Creation or Update
+            if (relatedTextMap.isEmpty()) {
+                resources.add(Map.of(RELATED_TEXT_ID, relatedTextId, RELATED_TEXT, comment.getText()));
+            } else {
+                relatedTextMap.put(RELATED_TEXT, comment.getText());
+            }
+        } else { // Remove
+            resources.remove(relatedTextMap);
+        }
+
+        topLevelDoc.setPropertyValue(RELATED_TEXT_RESOURCES, (Serializable) resources);
+        session.saveDocument(topLevelDoc);
+    }
+
+    /**
+     * {@link #manageRelatedTextOfTopLevelDocument(CoreSession, Comment)}
+     * 
+     * @since 11.1
+     **/
+    protected void manageRelatedTextOfTopLevelDocument(CoreSession session, DocumentModel commentDocModel) {
+        Comment createdComment = COMMENT_DOC_TYPE.equals(commentDocModel.getType())
+                ? Comments.newComment(commentDocModel)
+                : Comments.newAnnotation(commentDocModel);
+        manageRelatedTextOfTopLevelDocument(session, createdComment);
     }
 }

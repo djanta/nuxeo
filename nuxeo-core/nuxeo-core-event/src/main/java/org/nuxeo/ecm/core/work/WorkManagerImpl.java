@@ -809,6 +809,12 @@ public class WorkManagerImpl extends DefaultComponent implements WorkManager {
             break;
 
         }
+        if (work.isGroupJoin()) {
+            if (log.isDebugEnabled()) {
+                log.debug(String.format("Submit Work: %s to GroupJoin: %s", work.getId(), work.getPartitionKey()));
+            }
+            WorkStateHelper.addGroupJoinWork(work.getPartitionKey());
+        }
         queuing.workSchedule(queueId, work);
     }
 

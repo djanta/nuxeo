@@ -118,6 +118,7 @@ pipeline {
     SLIM_IMAGE_NAME = 'slim'
     // waiting for https://jira.nuxeo.com/browse/NXBT-3068 to put it in Global EnvVars
     PUBLIC_DOCKER_REGISTRY = 'docker.packages.nuxeo.com'
+    MAVEN_OPTS= "$MAVEN_OPTS -Xms512m -Xmx3072m"
     VERSION = getVersion()
   }
   stages {
@@ -129,19 +130,17 @@ pipeline {
       }
       steps {
         container('maven') {
-          withEnv(["MAVEN_OPTS=$MAVEN_OPTS -Xms512m -Xmx3072m"]) {
-            echo """
-            ----------------------------------------
-            Update version
-            ----------------------------------------
-            New version: ${VERSION}
-            """
-            echo "MAVEN_OPTS=$MAVEN_OPTS"
-            sh """
-              mvn -nsu versions:set -DnewVersion=${VERSION} -DgenerateBackupPoms=false
-              mvn versions:set-property -Dproperty=nuxeo.platform.version -DnewVersion=${VERSION} -DgenerateBackupPoms=false
-            """
-          }
+          echo """
+          ----------------------------------------
+          Update version
+          ----------------------------------------
+          New version: ${VERSION}
+          """
+          echo "MAVEN_OPTS=$MAVEN_OPTS"
+          sh """
+            mvn -V -nsu versions:set -DnewVersion=${VERSION} -DgenerateBackupPoms=false
+            mvn versions:set-property -Dproperty=nuxeo.platform.version -DnewVersion=${VERSION} -DgenerateBackupPoms=false
+          """
         }
       }
     }
@@ -153,10 +152,7 @@ pipeline {
           ----------------------------------------
           Compile
           ----------------------------------------"""
-          withEnv(["MAVEN_OPTS=$MAVEN_OPTS -Xms512m -Xmx3072m"]) {
-            echo "MAVEN_OPTS=$MAVEN_OPTS"
-            sh 'mvn -V -B -nsu -T0.8C -DskipTests install'
-          }
+          sh 'mvn -B -nsu -T0.8C -DskipTests install'
         }
       }
       post {
@@ -194,10 +190,7 @@ pipeline {
           ----------------------------------------
           Run "dev" unit tests
           ----------------------------------------"""
-          withEnv(["MAVEN_OPTS=$MAVEN_OPTS -Xms512m -Xmx3072m"]) {
-            echo "MAVEN_OPTS=$MAVEN_OPTS"
-            sh "mvn -B -nsu -Dnuxeo.test.redis.host=${REDIS_HOST} test"
-          }
+          sh "mvn -B -nsu -Dnuxeo.test.redis.host=${REDIS_HOST} test"
         }
       }
       post {
@@ -224,11 +217,8 @@ pipeline {
           ----------------------------------------
           Package
           ----------------------------------------"""
-          withEnv(["MAVEN_OPTS=$MAVEN_OPTS -Xms512m -Xmx3072m"]) {
-            echo "MAVEN_OPTS=$MAVEN_OPTS"
-            sh 'mvn -B -nsu -T0.8C -f nuxeo-distribution/pom.xml -DskipTests install'
-            sh 'mvn -B -nsu -T0.8C -f packages/pom.xml -DskipTests install'
-          }
+          sh 'mvn -B -nsu -T0.8C -f nuxeo-distribution/pom.xml -DskipTests install'
+          sh 'mvn -B -nsu -T0.8C -f packages/pom.xml -DskipTests install'
         }
       }
       post {
@@ -248,18 +238,15 @@ pipeline {
           ----------------------------------------
           Run "dev" functional tests
           ----------------------------------------"""
-          withEnv(["MAVEN_OPTS=$MAVEN_OPTS -Xms512m -Xmx3072m"]) {
-            script {
-              try {
-                echo "MAVEN_OPTS=$MAVEN_OPTS"
-                runFunctionalTests('nuxeo-distribution/nuxeo-server-tests')
-                runFunctionalTests('nuxeo-distribution/nuxeo-server-hotreload-tests')
-                runFunctionalTests('nuxeo-distribution/nuxeo-server-gatling-tests')
-                runFunctionalTests('ftests')
-                setGitHubBuildStatus('platform/ftests/dev', 'Functional tests - dev environment', 'SUCCESS')
-              } catch (err) {
-                setGitHubBuildStatus('platform/ftests/dev', 'Functional tests - dev environment', 'FAILURE')
-              }
+          script {
+            try {
+              runFunctionalTests('nuxeo-distribution/nuxeo-server-tests')
+              runFunctionalTests('nuxeo-distribution/nuxeo-server-hotreload-tests')
+              runFunctionalTests('nuxeo-distribution/nuxeo-server-gatling-tests')
+              runFunctionalTests('ftests')
+              setGitHubBuildStatus('platform/ftests/dev', 'Functional tests - dev environment', 'SUCCESS')
+            } catch (err) {
+              setGitHubBuildStatus('platform/ftests/dev', 'Functional tests - dev environment', 'FAILURE')
             }
           }
         }
@@ -278,10 +265,7 @@ pipeline {
           ----------------------------------------
           Deploy Maven artifacts
           ----------------------------------------"""
-          withEnv(["MAVEN_OPTS=$MAVEN_OPTS -Xms512m -Xmx3072m"]) {
-            echo "MAVEN_OPTS=$MAVEN_OPTS"
-            sh 'mvn -B -nsu -T0.8C -Pdistrib -DskipTests deploy'
-          }
+          sh 'mvn -B -nsu -T0.8C -Pdistrib -DskipTests deploy'
         }
       }
       post {

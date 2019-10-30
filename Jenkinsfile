@@ -386,7 +386,7 @@ pipeline {
             NUXEO_VERSION: ${VERSION}
           """
           // TODO: build pipeline on the same base branch (not necessarily master)
-          build job: '../nuxeo-jsf-ui/master',
+          build job: '../nuxeo-jsf-ui/PR-19',
             parameters: [
               string(name: 'NUXEO_BRANCH_NAME', value: "${BRANCH_NAME}"),
               string(name: 'NUXEO_COMMIT_SHA', value: "${GIT_COMMIT}"),

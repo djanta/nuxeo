@@ -18,6 +18,9 @@
  */
 package org.nuxeo.common.file;
 
+import static java.nio.file.StandardCopyOption.ATOMIC_MOVE;
+import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -283,7 +286,7 @@ public class LRUFileCache implements FileCache {
         checkKey(key);
         Path path = dir.resolve(key);
         try {
-            Files.move(source, path);
+            Files.move(source, path, ATOMIC_MOVE, REPLACE_EXISTING);
             recordAccess(path);
             clearOldEntries();
         } catch (FileAlreadyExistsException faee) {

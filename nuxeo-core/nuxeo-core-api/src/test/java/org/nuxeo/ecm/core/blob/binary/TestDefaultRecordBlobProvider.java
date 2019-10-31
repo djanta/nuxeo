@@ -24,13 +24,21 @@ import static org.junit.Assert.fail;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.Collections;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.BrokenBarrierException;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CyclicBarrier;
+import java.util.stream.Stream;
+
+import javax.inject.Inject;
 
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.IOUtils;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -40,6 +48,10 @@ import org.nuxeo.ecm.core.api.ConcurrentUpdateException;
 import org.nuxeo.ecm.core.api.NuxeoException;
 import org.nuxeo.ecm.core.api.impl.blob.StringBlob;
 import org.nuxeo.ecm.core.blob.BlobInfo;
+import org.nuxeo.ecm.core.blob.BlobManager;
+import org.nuxeo.ecm.core.blob.BlobManagerComponent;
+import org.nuxeo.ecm.core.blob.BlobProviderDescriptor;
+import org.nuxeo.runtime.test.runner.Deploy;
 import org.nuxeo.runtime.test.runner.Features;
 import org.nuxeo.runtime.test.runner.FeaturesRunner;
 import org.nuxeo.runtime.test.runner.TransactionalConfig;
@@ -49,6 +61,7 @@ import org.nuxeo.runtime.transaction.TransactionHelper;
 @RunWith(FeaturesRunner.class)
 @Features(TransactionalFeature.class)
 @TransactionalConfig(autoStart = false)
+@Deploy("org.nuxeo.ecm.core.api:OSGI-INF/blobmanager-service.xml")
 public class TestDefaultRecordBlobProvider {
 
     protected static final String ID = "12345";
@@ -73,7 +86,10 @@ public class TestDefaultRecordBlobProvider {
 
     protected static final int JOIN_TIMEOUT = 5_000; // 5s, increase this when debugging
 
-    protected DefaultRecordBlobProvider bp;
+    @Inject
+    protected BlobManager blobManager;
+
+    protected DefaultBinaryManager bp;
 
     /**
      * Helper to build a Blob and get the corresponding BlobInfo to use to re-read it from a BlobProvider.
@@ -116,45 +132,49 @@ public class TestDefaultRecordBlobProvider {
     }
 
     @Before
-    public void before() throws Exception {
-        bp = new DefaultRecordBlobProvider();
-        bp.initialize("repo", Collections.emptyMap());
+    public void before() {
+        BlobProviderDescriptor descr = new BlobProviderDescriptor();
+        descr.name = "repo";
+        descr.klass = DefaultBinaryManager.class;
+        descr.properties.put("record", "true");
+        ((BlobManagerComponent) blobManager).registerBlobProvider(descr);
+        bp = (DefaultBinaryManager) blobManager.getBlobProvider("repo");
     }
 
     @After
     public void after() {
-        File dir = bp.getStorageDir();
+        File dir = bp.storageDir;
         bp.close();
         assertTrue(FileUtils.deleteQuietly(dir));
     }
 
-    protected int countStorageFiles() {
-        return countFiles(bp.getStorageDir());
+    protected long countStorageFiles() throws IOException {
+        return countFiles(bp.storageDir.toPath());
     }
 
-    protected int countTmpFiles() {
-        return countFiles(bp.getTmpDir());
+    protected long countTmpFiles() throws IOException {
+        return countFiles(bp.tmpDir.toPath());
     }
 
-    protected static int countFiles(File dir) {
-        int n = 0;
-        for (File f : dir.listFiles()) {
-            if (f.isDirectory()) {
-                n += countFiles(f);
-            } else {
-                n++;
-            }
+    protected static long countFiles(Path dir) throws IOException {
+        try (Stream<Path> ps = Files.walk(dir)) {
+            return ps.filter(Files::isRegularFile).count(); // NOSONAR (squid:S3725)
         }
-        return n;
+    }
+
+    protected static void assertEmptyBlobStream(Blob blob) throws IOException {
+        try (InputStream stream = blob.getStream()) {
+            assertEquals("", IOUtils.toString(stream, StandardCharsets.ISO_8859_1));
+        }
     }
 
     @Test
-    public void testWriteErrors() throws Exception {
+    public void testWriteErrors() throws IOException {
         Blob blob = new StringBlob(HELLO_WORLD, MIME_TYPE, ENCODING, FILENAME);
 
         // must use main blob
         try {
-            bp.writeBlob(blob, ID, "files/0/files:file");
+            bp.writeBlob(new BlobContext(blob, ID, "files/0/files:file"));
             fail();
         } catch (NuxeoException e) {
             assertEquals("Cannot store blob at xpath 'files/0/files:file' in record blob provider: repo",
@@ -163,34 +183,31 @@ public class TestDefaultRecordBlobProvider {
 
         // must have a doc id
         try {
-            bp.writeBlob(blob, "", CONTENT_XPATH);
+            bp.writeBlob(new BlobContext(blob, "", CONTENT_XPATH));
             fail();
         } catch (NuxeoException e) {
-            assertEquals("Missing id", e.getMessage());
+            assertEquals("Invalid key: ", e.getMessage());
         }
     }
 
     @Test
-    public void testReadErrors() throws Exception {
+    public void testReadErrors() throws IOException {
         // unknown file
         BlobInfo blobInfo = new BlobInfo();
         blobInfo.key = "nosuchfile";
-        try {
-            bp.readBlob(blobInfo);
-            fail();
-        } catch (IOException e) {
-            assertEquals("Nonexistent file for key: nosuchfile", e.getMessage());
-        }
+        Blob blob = bp.readBlob(blobInfo);
+        // for nonexistent blobs we don't crash but return a 0-length stream
+        assertEmptyBlobStream(blob);
     }
 
     @Test
-    public void testCRUD() throws Exception {
+    public void testCRUD() throws IOException {
         assertEquals(0, countStorageFiles());
 
         BlobAndBlobInfo bbi = BlobAndBlobInfo.of(HELLO_WORLD, MIME_TYPE, ENCODING, FILENAME);
 
         // write a blob
-        String key = bp.writeBlob(bbi.blob, ID, CONTENT_XPATH);
+        String key = bp.writeBlob(new BlobContext(bbi.blob, ID, CONTENT_XPATH));
         assertEquals(ID, key);
         assertEquals(1, countStorageFiles());
 
@@ -201,7 +218,7 @@ public class TestDefaultRecordBlobProvider {
 
         // update the blob
         BlobAndBlobInfo bbi2 = BlobAndBlobInfo.of(LOREM_IPSUM, MIME_TYPE, ENCODING_UTF8, FILENAME_LOREM);
-        String key2 = bp.writeBlob(bbi2.blob, ID, CONTENT_XPATH);
+        String key2 = bp.writeBlob(new BlobContext(bbi2.blob, ID, CONTENT_XPATH));
         assertEquals(ID, key2);
         assertEquals(1, countStorageFiles());
 
@@ -214,17 +231,13 @@ public class TestDefaultRecordBlobProvider {
         bp.deleteBlob(ID, CONTENT_XPATH);
         assertEquals(0, countStorageFiles());
 
-        // cannot read the blob anymore
-        try {
-            bp.readBlob(bbi2.blobInfo);
-            fail();
-        } catch (IOException e) {
-            assertEquals("Nonexistent file for key: " + ID, e.getMessage());
-        }
+        // cannot read the blob anymore (empty stream)
+        blob2r = bp.readBlob(bbi2.blobInfo);
+        assertEmptyBlobStream(blob2r);
     }
 
     @Test
-    public void testTransaction() throws Exception {
+    public void testTransaction() throws IOException {
         assertEquals(0, countStorageFiles());
         assertEquals(0, countTmpFiles());
 
@@ -233,7 +246,7 @@ public class TestDefaultRecordBlobProvider {
 
         // write a blob
         BlobAndBlobInfo bbi = BlobAndBlobInfo.of(HELLO_WORLD, MIME_TYPE, ENCODING, FILENAME);
-        String key = bp.writeBlob(bbi.blob, ID, CONTENT_XPATH);
+        String key = bp.writeBlob(new BlobContext(bbi.blob, ID, CONTENT_XPATH));
         assertEquals(ID, key);
 
         // it's not in the storage yet
@@ -242,7 +255,7 @@ public class TestDefaultRecordBlobProvider {
 
         // update the blob
         BlobAndBlobInfo bbi2 = BlobAndBlobInfo.of(LOREM_IPSUM, MIME_TYPE, ENCODING_UTF8, FILENAME_LOREM);
-        String key2 = bp.writeBlob(bbi2.blob, ID, CONTENT_XPATH);
+        String key2 = bp.writeBlob(new BlobContext(bbi2.blob, ID, CONTENT_XPATH));
         assertEquals(ID, key2);
 
         // still not in storage
@@ -278,12 +291,8 @@ public class TestDefaultRecordBlobProvider {
         assertEquals(0, countTmpFiles());
 
         // cannot read the blob anymore
-        try {
-            bp.readBlob(bbi2.blobInfo);
-            fail();
-        } catch (IOException e) {
-            assertEquals("Nonexistent file for key: " + ID, e.getMessage());
-        }
+        blob2 = bp.readBlob(bbi2.blobInfo);
+        assertEmptyBlobStream(blob2);
 
         // commit
         TransactionHelper.commitOrRollbackTransaction();
@@ -294,7 +303,7 @@ public class TestDefaultRecordBlobProvider {
     }
 
     @Test
-    public void testTransactionSeveralBlobs() throws Exception {
+    public void testTransactionSeveralBlobs() throws IOException {
         assertEquals(0, countStorageFiles());
         assertEquals(0, countTmpFiles());
 
@@ -306,7 +315,7 @@ public class TestDefaultRecordBlobProvider {
         // write blobs
         for (int i = 0; i < n; i++) {
             Blob blob = new StringBlob(HELLO_WORLD, MIME_TYPE, ENCODING, FILENAME);
-            String key = bp.writeBlob(blob, "docid" + i, CONTENT_XPATH);
+            String key = bp.writeBlob(new BlobContext(blob, "docid" + i, CONTENT_XPATH));
             assertEquals("docid" + i, key);
         }
 
@@ -335,7 +344,7 @@ public class TestDefaultRecordBlobProvider {
     }
 
     @Test
-    public void testTransactionRollbackAfterCreation() throws Exception {
+    public void testTransactionRollbackAfterCreation() throws IOException {
         assertEquals(0, countStorageFiles());
         assertEquals(0, countTmpFiles());
 
@@ -344,7 +353,7 @@ public class TestDefaultRecordBlobProvider {
 
         // write a blob
         BlobAndBlobInfo bbi = BlobAndBlobInfo.of(HELLO_WORLD, MIME_TYPE, ENCODING, FILENAME);
-        String key = bp.writeBlob(bbi.blob, ID, CONTENT_XPATH);
+        String key = bp.writeBlob(new BlobContext(bbi.blob, ID, CONTENT_XPATH));
         assertEquals(ID, key);
 
         // it's not in the storage yet
@@ -365,22 +374,18 @@ public class TestDefaultRecordBlobProvider {
         assertEquals(0, countTmpFiles());
 
         // blob cannot be read
-        try {
-            bp.readBlob(bbi.blobInfo);
-            fail();
-        } catch (IOException e) {
-            assertEquals("Nonexistent file for key: " + ID, e.getMessage());
-        }
+        blob2 = bp.readBlob(bbi.blobInfo);
+        assertEmptyBlobStream(blob2);
     }
 
     @Test
-    public void testTransactionRollbackAfterUpdate() throws Exception {
+    public void testTransactionRollbackAfterUpdate() throws IOException, InterruptedException {
         assertEquals(0, countStorageFiles());
         assertEquals(0, countTmpFiles());
 
         // write a blob
         BlobAndBlobInfo bbi = BlobAndBlobInfo.of(HELLO_WORLD, MIME_TYPE, ENCODING, FILENAME);
-        String key = bp.writeBlob(bbi.blob, ID, CONTENT_XPATH);
+        String key = bp.writeBlob(new BlobContext(bbi.blob, ID, CONTENT_XPATH));
         assertEquals(ID, key);
         assertEquals(1, countStorageFiles());
         assertEquals(0, countTmpFiles());
@@ -395,7 +400,7 @@ public class TestDefaultRecordBlobProvider {
 
         // update the blob
         BlobAndBlobInfo bbi2 = BlobAndBlobInfo.of(LOREM_IPSUM, MIME_TYPE, ENCODING_UTF8, FILENAME_LOREM);
-        String key2 = bp.writeBlob(bbi2.blob, ID, CONTENT_XPATH);
+        String key2 = bp.writeBlob(new BlobContext(bbi2.blob, ID, CONTENT_XPATH));
         assertEquals(ID, key2);
         assertEquals(1, countStorageFiles());
         assertEquals(1, countTmpFiles());
@@ -430,13 +435,13 @@ public class TestDefaultRecordBlobProvider {
     }
 
     @Test
-    public void testTransactionRollbackAfterDelete() throws Exception {
+    public void testTransactionRollbackAfterDelete() throws IOException, InterruptedException {
         assertEquals(0, countStorageFiles());
         assertEquals(0, countTmpFiles());
 
         // write a blob
         BlobAndBlobInfo bbi = BlobAndBlobInfo.of(HELLO_WORLD, MIME_TYPE, ENCODING, FILENAME);
-        String key = bp.writeBlob(bbi.blob, ID, CONTENT_XPATH);
+        String key = bp.writeBlob(new BlobContext(bbi.blob, ID, CONTENT_XPATH));
         assertEquals(ID, key);
         assertEquals(1, countStorageFiles());
 
@@ -454,12 +459,8 @@ public class TestDefaultRecordBlobProvider {
         assertEquals(0, countTmpFiles());
 
         // blob cannot be read
-        try {
-            bp.readBlob(bbi.blobInfo);
-            fail();
-        } catch (IOException e) {
-            assertEquals("Nonexistent file for key: " + ID, e.getMessage());
-        }
+        blobr = bp.readBlob(bbi.blobInfo);
+        assertEmptyBlobStream(blobr);
 
         // outside transaction we still read the blob
         Runnable checkBlob = () -> {
@@ -491,7 +492,7 @@ public class TestDefaultRecordBlobProvider {
                 barrier.await();
                 // write blob
                 Blob blob = new StringBlob(HELLO_WORLD + "-" + i, MIME_TYPE, ENCODING, FILENAME);
-                String key = bp.writeBlob(blob, ID, CONTENT_XPATH);
+                String key = bp.writeBlob(new BlobContext(blob, ID, CONTENT_XPATH));
                 assertEquals(ID, key);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -518,7 +519,7 @@ public class TestDefaultRecordBlobProvider {
     }
 
     @Test
-    public void testTransactionConcurrencyCreateCreate() throws Throwable {
+    public void testTransactionConcurrencyCreateCreate() throws IOException, InterruptedException {
         assertEquals(0, countStorageFiles());
         assertEquals(0, countTmpFiles());
 
@@ -556,13 +557,13 @@ public class TestDefaultRecordBlobProvider {
     }
 
     @Test
-    public void testTransactionConcurrencyUpdateUpdate() throws Throwable {
+    public void testTransactionConcurrencyUpdateUpdate() throws IOException, InterruptedException {
         assertEquals(0, countStorageFiles());
         assertEquals(0, countTmpFiles());
 
         // write a blob
         BlobAndBlobInfo bbi = BlobAndBlobInfo.of(HELLO_WORLD, MIME_TYPE, ENCODING, FILENAME);
-        String key = bp.writeBlob(bbi.blob, ID, CONTENT_XPATH);
+        String key = bp.writeBlob(new BlobContext(bbi.blob, ID, CONTENT_XPATH));
         assertEquals(ID, key);
 
         assertEquals(1, countStorageFiles());
@@ -601,13 +602,13 @@ public class TestDefaultRecordBlobProvider {
     }
 
     @Test
-    public void testTransactionConcurrencyDeleteDelete() throws Throwable {
+    public void testTransactionConcurrencyDeleteDelete() throws IOException, InterruptedException {
         assertEquals(0, countStorageFiles());
         assertEquals(0, countTmpFiles());
 
         // write a blob
         BlobAndBlobInfo bbi = BlobAndBlobInfo.of(HELLO_WORLD, MIME_TYPE, ENCODING, FILENAME);
-        String key = bp.writeBlob(bbi.blob, ID, CONTENT_XPATH);
+        String key = bp.writeBlob(new BlobContext(bbi.blob, ID, CONTENT_XPATH));
         assertEquals(ID, key);
 
         assertEquals(1, countStorageFiles());
@@ -650,13 +651,13 @@ public class TestDefaultRecordBlobProvider {
     }
 
     @Test
-    public void testTransactionConcurrencyUpdateWinsOverDelete() throws Throwable {
+    public void testTransactionConcurrencyUpdateWinsOverDelete() throws IOException, InterruptedException {
         assertEquals(0, countStorageFiles());
         assertEquals(0, countTmpFiles());
 
         // write a blob
         BlobAndBlobInfo bbi = BlobAndBlobInfo.of(HELLO_WORLD, MIME_TYPE, ENCODING, FILENAME);
-        String key = bp.writeBlob(bbi.blob, ID, CONTENT_XPATH);
+        String key = bp.writeBlob(new BlobContext(bbi.blob, ID, CONTENT_XPATH));
         assertEquals(ID, key);
 
         assertEquals(1, countStorageFiles());
@@ -665,38 +666,34 @@ public class TestDefaultRecordBlobProvider {
         // update and delete the blob concurrently
         CyclicBarrier barrier = new CyclicBarrier(2);
         List<Throwable> exc = new CopyOnWriteArrayList<>();
-        Thread t1 = new Thread(() -> {
-            TransactionHelper.runInTransaction(() -> {
-                try {
-                    barrier.await(); // A
-                    // write blob first
-                    Blob blob = new StringBlob(HELLO_WORLD + "-1", MIME_TYPE, ENCODING, FILENAME);
-                    String k = bp.writeBlob(blob, ID, CONTENT_XPATH);
-                    barrier.await(); // B
-                    assertEquals(ID, k);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    exc.add(e);
-                } catch (Exception | AssertionError e) {
-                    exc.add(e);
-                }
-            });
-        });
-        Thread t2 = new Thread(() -> {
-            TransactionHelper.runInTransaction(() -> {
-                try {
-                    barrier.await(); // A
-                    barrier.await(); // B
-                    // delete blob
-                    bp.deleteBlob(ID, CONTENT_XPATH);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    exc.add(e);
-                } catch (Exception | AssertionError e) {
-                    exc.add(e);
-                }
-            });
-        });
+        Thread t1 = new Thread(() -> TransactionHelper.runInTransaction(() -> {
+            try {
+                barrier.await(); // A
+                // write blob first
+                Blob blob = new StringBlob(HELLO_WORLD + "-1", MIME_TYPE, ENCODING, FILENAME);
+                String k = bp.writeBlob(new BlobContext(blob, ID, CONTENT_XPATH));
+                barrier.await(); // B
+                assertEquals(ID, k);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                exc.add(e);
+            } catch (Exception | AssertionError e) {
+                exc.add(e);
+            }
+        }));
+        Thread t2 = new Thread(() -> TransactionHelper.runInTransaction(() -> {
+            try {
+                barrier.await(); // A
+                barrier.await(); // B
+                // delete blob
+                bp.deleteBlob(ID, CONTENT_XPATH);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                exc.add(e);
+            } catch (Exception | AssertionError e) {
+                exc.add(e);
+            }
+        }));
         t1.start();
         t2.start();
         t1.join(JOIN_TIMEOUT);
@@ -726,13 +723,13 @@ public class TestDefaultRecordBlobProvider {
     }
 
     @Test
-    public void testTransactionConcurrencyDeleteWinsOverUpdate() throws Throwable {
+    public void testTransactionConcurrencyDeleteWinsOverUpdate() throws IOException, InterruptedException {
         assertEquals(0, countStorageFiles());
         assertEquals(0, countTmpFiles());
 
         // write a blob
         BlobAndBlobInfo bbi = BlobAndBlobInfo.of(HELLO_WORLD, MIME_TYPE, ENCODING, FILENAME);
-        String key = bp.writeBlob(bbi.blob, ID, CONTENT_XPATH);
+        String key = bp.writeBlob(new BlobContext(bbi.blob, ID, CONTENT_XPATH));
         assertEquals(ID, key);
 
         assertEquals(1, countStorageFiles());
@@ -741,38 +738,42 @@ public class TestDefaultRecordBlobProvider {
         // update and delete the blob concurrently
         CyclicBarrier barrier = new CyclicBarrier(2);
         List<Throwable> exc = new CopyOnWriteArrayList<>();
-        Thread t1 = new Thread(() -> {
-            TransactionHelper.runInTransaction(() -> {
-                try {
-                    barrier.await(); // A
-                    barrier.await(); // B
-                    // write blob
-                    Blob blob = new StringBlob(HELLO_WORLD + "-1", MIME_TYPE, ENCODING, FILENAME);
-                    String k = bp.writeBlob(blob, ID, CONTENT_XPATH);
-                    assertEquals(ID, k);
-                } catch (InterruptedException e) {
+        Thread t1 = new Thread(() -> TransactionHelper.runInTransaction(() -> {
+            try {
+                barrier.await(); // A
+                barrier.await(); // B
+                // write blob
+                Blob blob = new StringBlob(HELLO_WORLD + "-1", MIME_TYPE, ENCODING, FILENAME);
+                bp.writeBlob(new BlobContext(blob, ID, CONTENT_XPATH));
+                fail("should get ConcurrentUpdateException");
+            } catch (Exception | AssertionError e) {
+                if (e instanceof InterruptedException) { // NOSONAR
                     Thread.currentThread().interrupt();
-                    exc.add(e);
-                } catch (Exception | AssertionError e) {
-                    exc.add(e);
                 }
-            });
-        });
-        Thread t2 = new Thread(() -> {
-            TransactionHelper.runInTransaction(() -> {
+                barrier.reset();
+                exc.add(e);
+            }
+        }));
+        Thread t2 = new Thread(() -> TransactionHelper.runInTransaction(() -> {
+            try {
+                barrier.await(); // A
+                // delete blob first
+                bp.deleteBlob(ID, CONTENT_XPATH);
+                barrier.await(); // B
                 try {
-                    barrier.await(); // A
-                    // delete blob first
-                    bp.deleteBlob(ID, CONTENT_XPATH);
-                    barrier.await(); // B
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    exc.add(e);
-                } catch (Exception | AssertionError e) {
-                    exc.add(e);
+                    barrier.await(); // C
+                    fail("should get BrokenBarrierException");
+                } catch (BrokenBarrierException bbe) {
+                    // expected, from reset() on exception in first thread
                 }
-            });
-        });
+            } catch (Exception | AssertionError e) {
+                if (e instanceof InterruptedException) { // NOSONAR
+                    Thread.currentThread().interrupt();
+                }
+                barrier.reset();
+                exc.add(e);
+            }
+        }));
         t1.start();
         t2.start();
         t1.join(JOIN_TIMEOUT);

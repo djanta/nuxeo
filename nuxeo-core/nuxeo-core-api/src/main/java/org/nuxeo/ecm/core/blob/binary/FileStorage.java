@@ -22,7 +22,9 @@ import java.io.File;
 import java.io.IOException;
 
 /**
- * Interface to store a file or fetch a file or its length.
+ * Interface to store a file or fetch a file.
+ * <p>
+ * A file is identified by a key, and holds a stream of bytes.
  *
  * @since 5.9.2
  */

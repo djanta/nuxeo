@@ -237,7 +237,8 @@ public class BlobManagerComponent extends DefaultComponent implements BlobManage
             return blobProvider.getStream((ManagedBlob) blob);
         } catch (IOException e) {
             // we don't want to crash everything if the remote file cannot be accessed
-            log.error("Failed to access file: " + ((ManagedBlob) blob).getKey(), e);
+            log.debug(e, e);
+            log.error("Failed to access file: " + ((ManagedBlob) blob).getKey());
             return new ByteArrayInputStream(new byte[0]);
         }
     }

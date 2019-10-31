@@ -18,7 +18,8 @@
       <class>org.nuxeo.ecm.core.DummyBlobProvider</class>
     </blobprovider>
     <blobprovider name="records1">
-      <class>org.nuxeo.ecm.core.blob.binary.DefaultRecordBlobProvider</class>
+      <class>org.nuxeo.ecm.core.blob.binary.DefaultBinaryManager</class>
+      <property name="record">true</property>
       <property name="path">records1</property>
     </blobprovider>
   </extension>

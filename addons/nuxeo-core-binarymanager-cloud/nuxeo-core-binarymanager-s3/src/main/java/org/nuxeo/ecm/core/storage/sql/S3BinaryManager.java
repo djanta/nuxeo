@@ -26,9 +26,12 @@ import static org.apache.commons.lang3.StringUtils.isNotBlank;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.security.KeyPair;
 import java.security.KeyStore;
@@ -39,11 +42,13 @@ import java.util.Collection;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 import javax.servlet.http.HttpServletRequest;
 
 import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.io.output.NullOutputStream;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -55,8 +60,15 @@ import org.nuxeo.ecm.core.api.NuxeoException;
 import org.nuxeo.ecm.core.blob.BlobManager;
 import org.nuxeo.ecm.core.blob.BlobProvider;
 import org.nuxeo.ecm.core.blob.ManagedBlob;
+import org.nuxeo.ecm.core.blob.binary.AbstractFileStore;
 import org.nuxeo.ecm.core.blob.binary.BinaryGarbageCollector;
+import org.nuxeo.ecm.core.blob.binary.BlobContext;
+import org.nuxeo.ecm.core.blob.binary.BlobWriteContext;
+import org.nuxeo.ecm.core.blob.binary.CachingFileStore;
 import org.nuxeo.ecm.core.blob.binary.FileStorage;
+import org.nuxeo.ecm.core.blob.binary.FileStore;
+import org.nuxeo.ecm.core.blob.binary.LocalFileStore;
+import org.nuxeo.ecm.core.blob.binary.WriteObserver;
 import org.nuxeo.runtime.api.Framework;
 import org.nuxeo.runtime.aws.NuxeoAWSRegionProvider;
 
@@ -159,6 +171,8 @@ public class S3BinaryManager extends AbstractCloudBinaryManager {
     @Deprecated
     private static final Pattern MD5_RE = Pattern.compile("[0-9a-f]{32}");
 
+    protected final S3FileStore fileStore;
+
     protected String bucketName;
 
     protected String bucketNamePrefix;
@@ -180,6 +194,10 @@ public class S3BinaryManager extends AbstractCloudBinaryManager {
     protected AmazonS3 amazonS3;
 
     protected TransferManager transferManager;
+
+    public S3BinaryManager() {
+        fileStore = new S3FileStore();
+    }
 
     @Override
     public void close() {
@@ -433,6 +451,11 @@ public class S3BinaryManager extends AbstractCloudBinaryManager {
         return new S3FileStorage();
     }
 
+    @Override
+    public S3FileStore getFileStore() {
+        return fileStore;
+    }
+
     /**
      * Gets the AWSCredentialsProvider.
      *
@@ -470,7 +493,15 @@ public class S3BinaryManager extends AbstractCloudBinaryManager {
     }
 
     @Override
+    public String writeBlob(BlobContext blobContext) throws IOException {
+        return fileStore.writeBlob(blobContext, isRecordMode(), getDigestAlgorithm());
+    }
+
+    @Override
     public String writeBlob(Blob blob) throws IOException {
+        return writeBlob(new BlobContext(blob));
+
+
         // Attempt to do S3 Copy if the Source Blob provider is also S3
         if (blob instanceof ManagedBlob) {
             ManagedBlob managedBlob = (ManagedBlob) blob;
@@ -556,6 +587,11 @@ public class S3BinaryManager extends AbstractCloudBinaryManager {
             log.debug(message, e);
             return null;
         }
+    }
+
+    @Override
+    public void deleteBlob(BlobContext blobContext) {
+        fileStore.deleteBlob(blobContext);
     }
 
     public class S3FileStorage implements FileStorage {
@@ -654,8 +690,316 @@ public class S3BinaryManager extends AbstractCloudBinaryManager {
                     log.debug("fetched blob " + digest + " from S3 in " + dtms + "ms");
                 }
             }
-
         }
+    }
+
+    public class S3FileStore extends AbstractFileStore {
+
+        public S3BinaryManager getS3BinaryManager() {
+            return S3BinaryManager.this;
+        }
+
+        @Override
+        public void writeBlob(BlobWriteContext blobWriteContext, WriteObserver writeObserver,
+                Supplier<String> keyComputer) throws IOException {
+            Path tmp = null;
+            Path file;
+            String key;
+            try {
+                if (blobWriteContext.file != null) {
+                    // we have a file, assume that the caller already observed the write
+                    file = blobWriteContext.file;
+                } else {
+                    // no transfer to a file was done yet (no caching)
+                    // we may be able to use the blob's underlying file, if not pure streaming
+                    File blobFile = blobWriteContext.blobContext.blob.getFile();
+                    if (blobFile != null) {
+                        if (writeObserver != null) {
+                            // we must run writes through the write observer
+                            LocalFileStore.transfer(blobWriteContext, new NullOutputStream(), writeObserver);
+                        } // otherwise use blob file directly
+                        file = blobFile.toPath();
+                    } else {
+                        // we must transfer the blob stream to a tmp file
+                        tmp = Files.createTempFile("bin_", ".tmp");
+                        LocalFileStore.transfer(blobWriteContext, tmp, writeObserver);
+                        file = tmp;
+                    }
+                }
+                key = keyComputer.get(); // can depend on write observer, for example for digests
+                if (key == null) {
+                    throw new NuxeoException("Missing key");
+                }
+                writeFile(key, file);
+            } finally {
+                if (tmp != null) {
+                    try {
+                        Files.delete(tmp);
+                    } catch (IOException e) {
+                        log.error(e, e);
+                    }
+                }
+            }
+        }
+
+        protected void writeFile(String key, Path file) throws IOException {
+            String bucketKey = bucketNamePrefix + key;
+            long t0 = 0;
+            if (log.isDebugEnabled()) {
+                t0 = System.currentTimeMillis();
+                log.debug("Writing s3://" + bucketName + "/" + bucketKey);
+            }
+
+            if (uniqueObjects()) { // only for digests
+                try {
+                    amazonS3.getObjectMetadata(bucketName, bucketKey);
+                    if (log.isDebugEnabled()) {
+                        log.debug("Blob s3://" + bucketName + "/" + bucketKey + " already exists");
+                    }
+                    return;
+                } catch (AmazonClientException e) {
+                    if (!isMissingKey(e)) {
+                        throw new IOException(e);
+                    }
+                }
+            }
+
+            PutObjectRequest request;
+            if (!isEncrypted) {
+                request = new PutObjectRequest(bucketName, bucketKey, file.toFile());
+                if (useServerSideEncryption) {
+                    ObjectMetadata objectMetadata = new ObjectMetadata();
+                    if (isNotBlank(serverSideKMSKeyID)) {
+                        SSEAwsKeyManagementParams keyManagementParams = new SSEAwsKeyManagementParams(
+                                serverSideKMSKeyID);
+                        request = request.withSSEAwsKeyManagementParams(keyManagementParams);
+                    } else {
+                        objectMetadata.setSSEAlgorithm(ObjectMetadata.AES_256_SERVER_SIDE_ENCRYPTION);
+                    }
+                    request.setMetadata(objectMetadata);
+                }
+            } else {
+                request = new EncryptedPutObjectRequest(bucketName, bucketKey, file.toFile());
+            }
+            Upload upload = transferManager.upload(request);
+            try {
+                upload.waitForUploadResult();
+            } catch (AmazonClientException ee) {
+                throw new IOException(ee);
+            } catch (InterruptedException ee) {
+                Thread.currentThread().interrupt();
+                throw new NuxeoException(ee);
+            } finally {
+                if (log.isDebugEnabled()) {
+                    long dtms = System.currentTimeMillis() - t0;
+                    log.debug("Wrote s3://" + bucketName + "/" + bucketKey + " in " + dtms + "ms");
+                }
+            }
+        }
+
+        @Override
+        public Path getLocalFile(String key) {
+            // we don't have a local file, it's the job of a caching wrapper
+            return null;
+        }
+
+        @Override
+        public InputStream getStream(String key) throws IOException {
+            // return null;
+            throw new UnsupportedOperationExceptionXXX();
+        }
+
+        @Override
+        public boolean readFileTo(String key, Path dest) throws IOException {
+            String bucketKey = bucketNamePrefix + key;
+            long t0 = 0;
+            if (log.isDebugEnabled()) {
+                t0 = System.currentTimeMillis();
+                log.debug("Reading s3://" + bucketName + "/" + bucketKey);
+            }
+            try {
+                Download download = transferManager.download(new GetObjectRequest(bucketName, bucketKey),
+                        dest.toFile());
+                download.waitForCompletion();
+                if (log.isDebugEnabled()) {
+                    long dtms = System.currentTimeMillis() - t0;
+                    log.debug("Read s3://" + bucketName + "/" + bucketKey + " in " + dtms + "ms");
+                }
+                if (isEncrypted || !uniqueObjects()) {
+                    // can't easily check the decrypted digest
+                    return true;
+                }
+                String digest = key;
+                if (!digest.equals(download.getObjectMetadata().getETag())) {
+                    // if our digest algorithm is not MD5 (so the ETag can never match),
+                    // or in case of a multipart upload (where the ETag may not be the MD5),
+                    // check manually the object integrity
+                    // TODO this is costly and it should possible to deactivate it
+                    String currentDigest = new DigestUtils(getDigestAlgorithm()).digestAsHex(file.toFile());
+                    if (!currentDigest.equals(digest)) {
+                        String msg = "Invalid S3 object digest, expected=" + digest + " actual=" + currentDigest;
+                        log.error(msg);
+                        throw new IOException(msg);
+                    }
+                }
+                return true;
+            } catch (AmazonClientException e) {
+                if (isMissingKey(e)) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("Blob s3://" + bucketName + "/" + bucketKey + " does not exist");
+                    }
+                    return false;
+                }
+                throw new IOException(e);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new NuxeoException(e);
+            }
+        }
+
+        @Override
+        public boolean copyFile(String key, FileStore sourceStore, String sourceKey, boolean move, boolean atomic)
+                throws IOException {
+            FileStore unwrappedSourceStore;
+            if (sourceStore instanceof CachingFileStore) {
+                unwrappedSourceStore = ((CachingFileStore) sourceStore).unwrap();
+            } else {
+                unwrappedSourceStore = sourceStore;
+            }
+            if (unwrappedSourceStore instanceof S3FileStore) {
+                // attempt direct S3-level copy
+                S3BinaryManager sourceBlobProvider = ((S3FileStore) unwrappedSourceStore).getS3BinaryManager();
+                try {
+                    boolean copied = copyFile(key, sourceBlobProvider, sourceKey, move);
+                    if (copied) {
+                        return true;
+                    }
+                } catch (AmazonServiceException e) {
+                    if (isMissingKey(e)) {
+                        // source not found
+                        return false;
+                    }
+                    throw new IOException(e);
+                }
+                // fall through if not copied
+            }
+            return copyFileGeneric(key, sourceStore, sourceKey, move);
+        }
+
+        /**
+         * @return {@code false} if manual copy is needed
+         * @throws AmazonServiceException if the source is missing
+         */
+        protected boolean copyFile(String key, S3BinaryManager sourceBlobProvider, String sourceKey, boolean move)
+                throws IOException, AmazonServiceException { // NOSONAR
+            String sourceBucketName = sourceBlobProvider.bucketName;
+            String sourceBucketKey = sourceBlobProvider.bucketNamePrefix + sourceKey;
+            String bucketKey = bucketNamePrefix + key;
+
+            long t0 = 0;
+            if (log.isDebugEnabled()) {
+                t0 = System.currentTimeMillis();
+                log.debug("Copying s3://" + sourceBucketName + "/" + sourceBucketKey + " to s3://" + bucketName + "/"
+                        + bucketKey);
+            }
+
+            if (uniqueObjects()) { // only for digests
+                try {
+                    amazonS3.getObjectMetadata(bucketName, bucketKey);
+                    if (log.isDebugEnabled()) {
+                        log.debug("Blob s3://" + bucketName + "/" + bucketKey + " already exists");
+                    }
+                    return true;
+                } catch (AmazonServiceException e) {
+                    if (!isMissingKey(e)) {
+                        throw new IOException(e);
+                    }
+                    // destination does not already exist, fall through to do the copy
+                }
+            }
+
+            // copy the blob
+            ObjectMetadata sourceMetadata = amazonS3.getObjectMetadata(sourceBucketName, sourceBucketKey);
+            // don't catch AmazonServiceException if missing, caller will do it
+            long length = sourceMetadata.getContentLength();
+            try {
+                String sseAlgorithm;
+                if (useServerSideEncryption) {
+                    if (isNotBlank(serverSideKMSKeyID)) {
+                        // TODO
+                        log.warn("S3 copy not supported with KMS, falling back to regular copy");
+                        return false;
+                    }
+                    sseAlgorithm = ObjectMetadata.AES_256_SERVER_SIDE_ENCRYPTION;
+                } else {
+                    sseAlgorithm = null;
+                }
+                S3Utils.copyFile(amazonS3, sourceMetadata, sourceBucketName, sourceBucketKey, bucketName, bucketKey, sseAlgorithm, false);
+                if (log.isDebugEnabled()) {
+                    long dtms = System.currentTimeMillis() - t0;
+                    log.debug("Copied s3://" + sourceBucketName + "/" + sourceBucketKey + " to s3://" + bucketName + "/"
+                            + bucketKey + " in " + dtms + "ms");
+                }
+                if (move) {
+                    // now delete source
+                    try {
+                        amazonS3.deleteObject(sourceBucketName, sourceBucketKey);
+                    } catch (AmazonServiceException e) {
+                        log.error(e, e);
+                    }
+                }
+                return true;
+            } catch (AmazonServiceException e) {
+                String message = "Direct copy failed from s3://" + sourceBucketName + "/" + sourceBucketKey
+                        + " to s3://" + bucketName + "/" + bucketKey + " (" + length + " bytes)";
+                log.warn(message + ", falling back to slow copy: " + e.getMessage());
+                log.debug(message, e);
+                return false;
+            }
+        }
+
+        protected boolean copyFileGeneric(String key, FileStore sourceStore, String sourceKey, boolean move)
+                throws IOException {
+            Path tmp = null;
+            try {
+                Path file = sourceStore.getLocalFile(sourceKey);
+                if (file == null) {
+                    // no local file available, read from source
+                    tmp = Files.createTempFile("bin_", ".tmp");
+                    boolean found = sourceStore.readFileTo(sourceKey, tmp);
+                    if (!found) {
+                        return false;
+                    }
+                    file = tmp;
+                }
+                writeFile(key, file); // always atomic
+                if (move) {
+                    sourceStore.deleteFile(sourceKey);
+                }
+                return true;
+            } finally {
+                if (tmp != null) {
+                    try {
+                        Files.delete(tmp);
+                    } catch (IOException e) {
+                        log.error(e, e);
+                    }
+                }
+            }
+        }
+
+        @Override
+        public void deleteFile(String key) {
+            String bucketKey = bucketNamePrefix + key;
+            try {
+                amazonS3.deleteObject(bucketName, bucketKey);
+            } catch (AmazonServiceException e) {
+                if (!isMissingKey(e)) {
+                    log.error(e, e);
+                }
+            }
+        }
+
     }
 
     /**

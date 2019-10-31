@@ -34,6 +34,7 @@ import org.nuxeo.ecm.core.api.NuxeoException;
 import org.nuxeo.ecm.core.blob.BlobManager.UsageHint;
 import org.nuxeo.ecm.core.blob.apps.AppLink;
 import org.nuxeo.ecm.core.blob.binary.BinaryManager;
+import org.nuxeo.ecm.core.blob.binary.BlobContext;
 
 /**
  * Interface for a provider of {@link Blob}s, which knows how to read and write them.
@@ -101,14 +102,12 @@ public interface BlobProvider {
      * <p>
      * Called to store a user-created blob.
      *
-     * @param blob the blob
-     * @param id the document id
-     * @param xpath the blob xpath
+     * @param blobContext the blob context
      * @return the blob key
      * @since 11.1
      */
-    default String writeBlob(Blob blob, String id, String xpath) throws IOException {
-        return writeBlob(blob);
+    default String writeBlob(BlobContext blobContext) throws IOException {
+        return writeBlob(blobContext.blob);
     }
 
     /**
@@ -125,12 +124,11 @@ public interface BlobProvider {
     /**
      * Deletes a blob from storage. Only meaningful for a record blob provider.
      *
-     * @param id the document id
-     * @param xpath the blob xpath
+     * @param blobContext the blob context
      * @see #isRecordMode
      * @since 11.1
      */
-    default void deleteBlob(String id, String xpath) {
+    default void deleteBlob(BlobContext blobContext) {
         throw new UnsupportedOperationException();
     }
 

@@ -44,6 +44,7 @@ import org.nuxeo.ecm.core.blob.ManagedBlob;
 import org.nuxeo.ecm.core.blob.binary.BinaryBlobProvider;
 import org.nuxeo.ecm.core.blob.binary.BinaryGarbageCollector;
 import org.nuxeo.ecm.core.blob.binary.BinaryManager;
+import org.nuxeo.ecm.core.blob.binary.BlobContext;
 import org.nuxeo.ecm.core.blob.binary.CachingBinaryManager;
 import org.nuxeo.ecm.core.blob.binary.FileStorage;
 import org.nuxeo.ecm.core.io.download.DownloadHelper;
@@ -139,6 +140,12 @@ public abstract class AbstractCloudBinaryManager extends CachingBinaryManager im
     public Blob readBlob(BlobInfo blobInfo) throws IOException {
         // just delegate to avoid copy/pasting code
         return new BinaryBlobProvider(this).readBlob(blobInfo);
+    }
+
+    @Override
+    public String writeBlob(BlobContext blobContext) throws IOException {
+        // just delegate to avoid copy/pasting code
+        return new BinaryBlobProvider(this).writeBlob(blobContext);
     }
 
     @Override

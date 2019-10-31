@@ -49,6 +49,22 @@ public class BlobProviderDescriptor {
     public static final String TRANSIENT = "transient";
 
     /**
+     * Flags this blob provider as using "record mode".
+     * <p>
+     * Record mode has the following characteristics:
+     * <ul>
+     * <li>transactional (blobs aren't actually written/deleted until the transaction commits, and transaction rollback
+     * is possible),
+     * <li>doesn't do de-duplication, each blob is stored individually,
+     * <li>stores only one blob per document (the main blob, file:content),
+     * <li>can replace or delete a document's blob.
+     * </ul>
+     *
+     * @since 11.1
+     */
+    public static final String RECORD = "record";
+
+    /**
      * A comma-separated list of users that can create blobs in this blob provider based only on a key.
      *
      * @since 10.2

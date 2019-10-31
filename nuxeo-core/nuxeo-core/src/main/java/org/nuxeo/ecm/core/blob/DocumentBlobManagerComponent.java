@@ -36,6 +36,7 @@ import org.nuxeo.ecm.core.blob.BlobDispatcher.BlobDispatch;
 import org.nuxeo.ecm.core.blob.binary.BinaryGarbageCollector;
 import org.nuxeo.ecm.core.blob.binary.BinaryManager;
 import org.nuxeo.ecm.core.blob.binary.BinaryManagerStatus;
+import org.nuxeo.ecm.core.blob.binary.BlobContext;
 import org.nuxeo.ecm.core.model.Document;
 import org.nuxeo.ecm.core.model.Document.BlobAccessor;
 import org.nuxeo.ecm.core.model.Repository;
@@ -188,7 +189,8 @@ public class DocumentBlobManagerComponent extends DefaultComponent implements Do
             throw new DocumentSecurityException(
                     "Cannot change blob from document " + doc.getUUID() + ", it is under retention / hold");
         }
-        String key = blobProvider.writeBlob(blob, doc.getUUID(), xpath);
+        BlobContext blobContext = new BlobContext(blob, doc, xpath);
+        String key = blobProvider.writeBlob(blobContext);
         if (dispatch.addPrefix) {
             key = dispatch.providerId + ':' + key;
         }

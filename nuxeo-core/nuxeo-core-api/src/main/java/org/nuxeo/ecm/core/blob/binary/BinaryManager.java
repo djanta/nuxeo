@@ -46,6 +46,11 @@ public interface BinaryManager {
      */
     void initialize(String blobProviderId, Map<String, String> properties) throws IOException;
 
+    /** @since 11.1 */
+    default FileStore getFileStore() {
+        return null;
+    }
+
     /**
      * Saves the given blob into a {@link Binary}.
      * <p>

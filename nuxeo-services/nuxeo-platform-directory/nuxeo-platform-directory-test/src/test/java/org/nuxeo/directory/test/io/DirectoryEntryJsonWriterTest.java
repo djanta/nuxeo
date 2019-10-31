@@ -22,6 +22,7 @@ package org.nuxeo.directory.test.io;
 
 import static org.nuxeo.ecm.directory.io.DirectoryEntryJsonWriter.ENTITY_TYPE;
 
+import java.io.IOException;
 import java.util.Locale;
 
 import javax.inject.Inject;
@@ -154,6 +155,43 @@ public class DirectoryEntryJsonWriterTest extends
             json.isObject();
             json = json.has("properties").isObject();
             json = json.has("label").isEquals("123");
+        }
+    }
+
+    @Test
+    @Deploy("org.nuxeo.ecm.directory.tests:test-parent-child-directories.xml")
+    public void testParentChildDirectoriesWithSameIds() throws IOException {
+        String directoryName = "subsubdir";
+        Directory directory = directoryService.getDirectory(directoryName);
+        try (Session session = directory.getSession()) {
+            DocumentModel entryModel = session.getEntry("10");
+            DirectoryEntry entry = new DirectoryEntry(directoryName, entryModel);
+            JsonAssert json = jsonAssert(entry, CtxBuilder.fetch(ENTITY_TYPE, "parent").get());
+            json.isObject();
+            json.properties(4);
+            json.has("entity-type").isEquals("directoryEntry");
+            json.has("directoryName").isEquals(directoryName);
+            json.has("id").isEquals("10");
+            json = json.has("properties").isObject();
+            json.properties(5);
+            json.has("id").isEquals("10");
+            json.has("label").isEquals("Sub Sub 10");
+            // parent in subdir
+            json = json.has("parent").isObject();
+            json.has("entity-type").isEquals("directoryEntry");
+            json.has("directoryName").isEquals("subdir");
+            json.has("id").isEquals("20");
+            json = json.has("properties").isObject();
+            json.has("id").isEquals("20");
+            json.has("label").isEquals("Sub 20");
+            // parent in parentdir
+            json = json.has("parent").isObject();
+            json.has("entity-type").isEquals("directoryEntry");
+            json.has("directoryName").isEquals("parentdir");
+            json.has("id").isEquals("10");
+            json = json.has("properties").isObject();
+            json.has("id").isEquals("10");
+            json.has("label").isEquals("Parent 10");
         }
     }
 
